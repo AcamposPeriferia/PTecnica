@@ -1,5 +1,28 @@
 import { parseCop } from "./normalization";
-import type { Cotizacion, Factura } from "./types";
+
+export interface Cotizacion {
+  numero: string;
+  fecha: string;
+  proveedorNombre: string;
+  proveedorNit: string;
+  descripcion: string;
+  cantidad: number;
+  valorUnitario: number;
+  subtotal: number;
+  baseGravable: number;
+  ivaTasa: number;
+  ivaValor: number;
+  total: number;
+  moneda: string;
+  validezDias: number;
+}
+
+export interface Factura {
+  numero: string;
+  fecha: string;
+  proveedorNit: string;
+  total: number;
+}
 
 function requiredMatch(text: string, pattern: RegExp, field: string): string {
   const match = text.match(pattern)?.[1]?.trim();

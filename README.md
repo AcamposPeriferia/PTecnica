@@ -1,265 +1,88 @@
-# Validador de solicitudes de compra
+# Agente conversacional — Órdenes de compra SAP
 
-Aplicación web construida para una prueba técnica de automatización del proceso de compras. Recibe y revisa un expediente, contrasta sus datos con los maestros corporativos, explica cada incumplimiento y, cuando todo es válido, genera un borrador estructurado de orden de compra.
+Agente de chat que lee el paquete de una solicitud de compra (correo, solicitud, cotización, aprobación y, si aplica, factura), lo valida contra los maestros de Periferia (RC1–RC10), construye el payload de la OC, genera la evidencia de aprobación y crea la orden en un SAP simulado. Las excepciones no se resuelven solas: se le devuelven a la analista con una recomendación y esperan su confirmación explícita.
 
-**Aplicación pública:** [reto-03-pearl.vercel.app](https://reto-03-pearl.vercel.app)
+Construido para el reto técnico [`PRD-03-agente-ordenes-compra-sap`](../PRD-03-agente-ordenes-compra-sap%203.md). El planteamiento completo de la solución está en [`SOLUCION.md`](./SOLUCION.md).
 
-## ¿De qué se trató la prueba?
+## Arranque en local (un comando)
 
-El material inicial contenía datos maestros y seis expedientes de compra con solicitudes, cotizaciones, aprobaciones por correo y, en un caso, una factura. El objetivo funcional era determinar si cada solicitud podía convertirse en una orden de compra y justificar la decisión con evidencia verificable.
-
-La solución se desarrolló en dos etapas:
-
-1. Un motor determinístico que interpreta los fixtures, aplica las reglas de negocio y presenta los resultados en una bandeja auditable.
-2. Una entrada documental que acepta XLSX, PDF y EML originales. Primero intenta extraer los datos con código convencional y utiliza un LLM únicamente como fallback para formatos ambiguos.
-
-El resultado no es solo una pantalla de estados: cada decisión conserva el código del control, su severidad, la explicación y el archivo o maestro que sirvió como fuente.
-
-## Resultado funcional
-
-La aplicación ofrece dos vistas principales:
-
-- **Expedientes:** muestra los seis casos entregados, sus métricas y el detalle de cada validación.
-- **Nueva validación:** permite cargar un paquete documental y evaluarlo sin almacenarlo.
-
-Una evaluación puede terminar en uno de estos estados:
-
-| Estado | Significado | Consecuencia |
-| --- | --- | --- |
-| `APROBADA` | No existen bloqueos ni advertencias | Se genera el borrador de la orden de compra |
-| `BLOQUEADA` | Existe al menos un hallazgo bloqueante | No se genera orden hasta corregir el expediente |
-| `REQUIERE_REVISION` | No hay bloqueos, pero existe una excepción | Una persona debe decidir antes de continuar |
-
-## Flujo de procesamiento
-
-```mermaid
-flowchart LR
-    A[Fixtures o documentos originales] --> B[Validación de estructura y tipo]
-    B --> C[Extracción determinística]
-    C -->|Formato ambiguo| D[Fallback LLM opcional]
-    C --> E[Datos tipados y validados con Zod]
-    D --> E
-    E --> F[Motor de reglas de negocio]
-    F --> G{Resultado}
-    G -->|Sin hallazgos críticos| H[APROBADA + borrador OC]
-    G -->|Bloqueante| I[BLOQUEADA]
-    G -->|Advertencia| J[REQUIERE REVISION]
-```
-
-La extracción y la decisión están deliberadamente separadas. El LLM puede ayudar a leer un documento, pero nunca aprueba compras, calcula topes ni modifica reglas.
-
-## Lógica de negocio
-
-El motor de dominio aplica las siguientes validaciones en orden:
-
-### 1. Proveedor
-
-- Busca el proveedor por NIT normalizado y, como alternativa, por nombre normalizado.
-- Verifica que exista en `maestros/proveedores.json`.
-- Verifica que se encuentre activo.
-- Recupera su código SAP, condición de pago e indicador de IVA predeterminados.
-
-Un proveedor inexistente o inactivo genera un hallazgo bloqueante.
-
-### 2. Enriquecimiento de datos
-
-Algunos campos pueden faltar en la solicitud. El sistema los completa únicamente desde fuentes confiables:
-
-- NIT: solicitud, cotización o maestro.
-- Indicador de IVA: solicitud o maestro del proveedor.
-- Condición de pago: solicitud o maestro del proveedor.
-
-Cada campo resuelto conserva su origen para que sea posible auditarlo.
-
-### 3. Imputación contable
-
-- El centro de costo debe existir.
-- La subárea indicada debe pertenecer a ese centro.
-- Los códigos de IVA y condición de pago deben estar registrados en sus maestros.
-
-### 4. Consistencia monetaria
-
-- `cantidad × valor unitario` debe coincidir con el total solicitado.
-- Solicitud y cotización deben coincidir en cantidad, valor unitario, total, moneda y NIT cuando esté presente.
-- Los importes se manejan como enteros en COP para evitar errores de punto flotante.
-
-### 5. Aprobación
-
-- El cuerpo del correo debe contener una aprobación explícita.
-- El remitente debe aparecer como aprobador del centro de costo.
-- El total cotizado no puede superar el tope autorizado para ese aprobador.
-
-### 6. Vigencia y cronología
-
-- La cotización debe estar vigente en la fecha de la solicitud.
-- Una factura anterior a la solicitud se considera compra retroactiva y requiere revisión humana.
-- Las inconsistencias cronológicas de los fixtures se conservan como observaciones informativas.
-
-### 7. Decisión final
-
-La precedencia es intencional:
-
-1. Cualquier severidad `BLOQUEANTE` produce `BLOQUEADA`.
-2. Sin bloqueos, una `ADVERTENCIA` produce `REQUIERE_REVISION`.
-3. Sin bloqueos ni advertencias, el expediente queda `APROBADA`.
-
-El borrador de orden solo se construye cuando la solicitud queda aprobada y todos los datos necesarios fueron resueltos.
-
-## Ingreso y extracción de documentos
-
-La carga admite:
-
-| Documento | Formato | Obligatorio |
-| --- | --- | --- |
-| Solicitud de compra | `.xlsx` | Sí |
-| Cotización | `.pdf` con texto seleccionable | Sí |
-| Aprobación | `.eml` | Sí |
-| Factura | `.pdf` | No |
-
-Controles aplicados:
-
-- máximo cuatro archivos y 4 MB por paquete;
-- validación de extensión y firma binaria;
-- detección de tipos documentales duplicados;
-- procesamiento en memoria y sin persistencia;
-- respuesta HTTP con `Cache-Control: no-store`;
-- límites de tiempo, reintentos y longitud para el fallback de IA;
-- instrucciones contra prompt injection y salida estructurada validada con Zod.
-
-Los PDF escaneados sin capa de texto requieren todavía OCR o extracción multimodal.
-
-## Arquitectura
-
-Se aplicó una separación inspirada en Clean Architecture, manteniendo el dominio independiente de Next.js, del sistema de archivos y de OpenAI.
-
-```text
-src/
-├── domain/          Modelos, esquemas, normalización, parsers y reglas puras
-├── application/     Casos de uso de evaluación y extracción documental
-├── infrastructure/  Lectura de fixtures y adaptadores externos
-├── components/      Interfaz de usuario
-└── app/             Páginas y endpoints HTTP de Next.js
-```
-
-### Dominio
-
-`src/domain/evaluate.ts` contiene el motor principal. Es una función pura: recibe un expediente y los maestros, y devuelve una evaluación sin depender de HTTP, React, archivos o servicios externos.
-
-### Aplicación
-
-Coordina la carga de datos y la extracción de documentos. Decide cuándo ejecutar un parser determinístico y cuándo solicitar el fallback opcional.
-
-### Infraestructura
-
-Implementa los detalles externos:
-
-- repositorio de archivos JSON y TXT;
-- cliente OpenAI encapsulado detrás de un adaptador;
-- lectura de PDF, Excel y correo electrónico.
-
-### Presentación
-
-Next.js expone la interfaz y tres recursos HTTP:
-
-- `GET /api/solicitudes`: listado completo de evaluaciones.
-- `GET /api/solicitudes/:id`: evaluación individual.
-- `POST /api/ingesta`: carga y evaluación de documentos originales.
-
-## Tecnologías utilizadas
-
-- Next.js 16 y React 19.
-- TypeScript con comprobación estricta.
-- Zod para validar entradas y salidas.
-- Vitest para pruebas automatizadas.
-- `unpdf` para extraer texto de PDF.
-- `read-excel-file` para XLSX.
-- `mailparser` para EML.
-- OpenAI Responses API como fallback opcional.
-- Vercel para el despliegue.
-
-## Decisiones de diseño
-
-- **Reglas determinísticas:** una decisión financiera debe ser repetible y explicable.
-- **LLM limitado a extracción:** reduce alucinaciones y evita delegar autoridad de negocio.
-- **Sin base de datos:** los fixtures son de solo lectura y los documentos cargados son efímeros.
-- **Trazabilidad:** todos los hallazgos señalan su fuente.
-- **Esquemas en los límites:** los datos se validan antes de entrar al dominio.
-- **Dinero como entero:** evita errores de precisión.
-- **Dependencias invertidas:** el dominio no conoce los adaptadores externos.
-
-## Ejecución local
-
-### Requisitos
-
-- Node.js 22.x.
-- npm 10 o superior.
-
-### Instalación
+Requisitos: Node 20+ (probado en Node 22/24) y una clave de OpenAI.
 
 ```bash
-git clone https://github.com/AcamposPeriferia/PTecnica.git
-cd PTecnica
-npm ci
-```
-
-### Variables de entorno
-
-El flujo determinístico funciona sin secretos. Para habilitar OpenAI, copie `.env.example` como `.env.local`:
-
-```dotenv
-OPENAI_API_KEY=su_clave
-OPENAI_MODEL=gpt-5.5
-```
-
-`.env.local` está ignorado por Git y no debe compartirse ni versionarse.
-
-### Inicio
-
-```bash
-npm run validate:data
-npm test
+npm install
+cp .env.example .env.local   # completar OPENAI_API_KEY
 npm run dev
 ```
 
-Abra [http://localhost:3000](http://localhost:3000).
+Abre `http://localhost:3000`. El mismo comando levanta el front (chat) y el backend (API del agente); no hay procesos separados que orquestar.
 
-## Calidad y pruebas
+## Variables de entorno
 
-```bash
-npm run lint
-npm run typecheck
-npm test
-npm run build
-```
+Ver [`.env.example`](./.env.example). Solo `OPENAI_API_KEY` es obligatoria; el resto tiene valores por defecto razonables.
 
-La suite cubre:
+| Variable | Obligatoria | Descripción |
+|---|---|---|
+| `OPENAI_API_KEY` | Sí | Clave del proveedor LLM. Solo se lee en el backend; nunca se expone al front, al repo ni a los logs. |
+| `OPENAI_MODEL` | No | Modelo a usar (por defecto `gpt-5.5`). |
+| `OPENAI_TIMEOUT_MS` | No | Timeout de la llamada al proveedor (por defecto 30000). |
+| `AGENT_MAX_ITERATIONS` | No | Tope de iteraciones herramienta→modelo por turno (por defecto 25, tope duro 25). |
+| `AGENT_MAX_OUTPUT_TOKENS` | No | Tokens máximos de salida por llamada al modelo (por defecto 2000). |
+| `AGENT_MAX_SESSION_TURNS` | No | Tope de turnos de usuario por sesión (por defecto 30). |
+| `AGENT_RATE_LIMIT` | No | Máximo de solicitudes por IP cada 10 minutos (por defecto 20). |
 
-- integridad de los maestros y fixtures;
-- parsing de cotizaciones y facturas;
-- extracción de XLSX y EML;
-- clasificación y firma de archivos;
-- estados aprobados, bloqueados y de revisión;
-- reglas de proveedor, imputación, montos, aprobación y cronología.
+No hay autenticación: el link puede ser público (no-objetivo explícito del PRD).
 
-## Despliegue
+## `demo.ts` — verificación sin front ni sesión de chat
 
-La versión actual se ejecuta en Vercel sobre Node.js 22.x:
-
-- Producción: [reto-03-pearl.vercel.app](https://reto-03-pearl.vercel.app)
-- Repositorio: [AcamposPeriferia/PTecnica](https://github.com/AcamposPeriferia/PTecnica)
-
-Los secretos `OPENAI_API_KEY` y `OPENAI_MODEL` están configurados únicamente en el entorno Production de Vercel. Para desplegar manualmente:
+Procesa los 6 casos de `fixtures/solicitudes/` llamando directamente a las herramientas (`src/tools/oc.ts`), sin pasar por el modelo ni por ninguna clave de proveedor:
 
 ```bash
-npx vercel@latest deploy --prod
+npm run demo
 ```
 
-## Limitaciones y evolución
+Imprime por caso si es apta, sus bloqueos, sus confirmaciones y si es retroactiva; crea la OC cuando corresponde y termina repitiendo `sol-001` para mostrar la idempotencia (mismo `numero_oc`, `idempotente=true`). El resultado es determinístico salvo los timestamps; `out/` se limpia al inicio del script.
 
-- Incorporar OCR o entrada multimodal para documentos escaneados.
-- Probar más formatos reales y documentos adversariales.
-- Añadir métricas de latencia, costo y tasa de revisión manual sin registrar contenido sensible.
-- Definir una política organizacional de auditoría y retención.
-- Conectar GitHub con Vercel para despliegues automáticos.
+## Comandos disponibles
 
-El seguimiento detallado está en [`docs/ROADMAP.md`](docs/ROADMAP.md).
+| Comando | Qué hace |
+|---|---|
+| `npm run dev` | Levanta front + backend en local. |
+| `npm run build` / `npm start` | Build y arranque en modo producción. |
+| `npm run demo` | Corre los 6 casos sin modelo (ver arriba). |
+| `npm test` | Corre las pruebas unitarias (vitest). |
+| `npm run typecheck` | `tsc --noEmit`. |
+| `npm run lint` | ESLint. |
+| `npm run build:modulo` | Regenera `modulo/` a partir de `agent/prompt.md` y `src/knowledge/ordenes-compra.md` (ver más abajo). |
+
+## API
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/api/chat` | `{ sessionId, message }` → `{ reply, toolCalls[], needsConfirmation, sessionId, model }`. Ejecuta un turno completo del agente (loop modelo↔herramientas). |
+| `GET` | `/api/sessions/:id` | Historial completo de la sesión (para recargar el chat). |
+| `GET` | `/api/health` | `{ ok, provider, model, configured }`, sin exponer la clave. |
+
+## Estructura
+
+```
+agent/prompt.md              # system prompt (comportamiento)
+src/knowledge/                # conocimiento del proceso de negocio
+src/tools/oc.ts               # las 5 herramientas del contrato (oc_*)
+src/sap/                      # interfaz SapAdapter + mock sobre out/sap/
+src/llm/                      # adaptador LLM propio (adapter.ts) + implementación OpenAI
+src/agent/                    # ciclo del agente (runner.ts) y sesiones en archivo
+src/domain/                   # esquemas zod y normalización de los fixtures
+src/components/agent-chat.tsx # front de chat (Next.js/React)
+fixtures/                     # entregado por Periferia, no se modifica
+out/                          # generado en ejecución (control.csv, log.jsonl, sap/, evidencia)
+modulo/                       # bonus: agente empaquetado, reutilizable sin el servidor
+demo.ts                       # ver arriba
+```
+
+## `modulo/` — agente reutilizable (bonus)
+
+`modulo/agent.md`, `modulo/tools/oc.ts` y `modulo/skill/ordenes-compra/SKILL.md` son las **mismas** piezas que usa la aplicación, no copias: `modulo/tools/oc.ts` reexporta `src/tools/oc.ts`, y `modulo/agent.md` / `modulo/skill/.../SKILL.md` se regeneran desde `agent/prompt.md` y `src/knowledge/ordenes-compra.md` con `npm run build:modulo`. Ejecútalo de nuevo después de tocar cualquiera de esas dos fuentes.
+
+## Link de prueba
+
+Pendiente de despliegue — ver la sección de riesgos en `SOLUCION.md`. Mientras tanto, `npm run dev` deja la aplicación disponible en `http://localhost:3000` en menos de un minuto.
