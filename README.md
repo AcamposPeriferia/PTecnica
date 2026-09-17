@@ -106,3 +106,5 @@ Cada archivo tiene un límite de 4 MB. El front sube los archivos a `POST /api/u
 **https://reto-03-pearl.vercel.app**
 
 Sin autenticación (link público). Desplegado en Vercel; `OPENAI_API_KEY` y `OPENAI_MODEL` están configuradas como variables de entorno del proyecto en Vercel, nunca en el repositorio. `runtimeOutputDirectory()` (`src/agent/runner.ts`) usa `/tmp` en este entorno serverless en vez de `out/`, ya que el sistema de archivos de producción es efímero por invocación.
+
+**Limitación conocida del despliegue serverless:** Vercel no garantiza que `/tmp` se comparta entre invocaciones de función distintas. En la práctica, el chat suele funcionar de punta a punta (incluida la confirmación en dos turnos) porque las requests seguidas reutilizan la misma instancia tibia, pero no es un comportamiento garantizado — especialmente entre "subir un caso nuevo" y el mensaje de chat que lo ingiere, que son dos requests separadas. Ver `SOLUCION.md` §12 para el detalle y la mitigación (moverlo a un almacenamiento compartido tipo Vercel Blob/KV). En local (`npm run dev`) esto no aplica: es un único proceso.
