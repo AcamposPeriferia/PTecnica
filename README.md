@@ -85,4 +85,6 @@ demo.ts                       # ver arriba
 
 ## Link de prueba
 
-Pendiente de despliegue — ver la sección de riesgos en `SOLUCION.md`. Mientras tanto, `npm run dev` deja la aplicación disponible en `http://localhost:3000` en menos de un minuto.
+**https://reto-03-pearl.vercel.app**
+
+Sin autenticación (link público). Desplegado en Vercel; `OPENAI_API_KEY` y `OPENAI_MODEL` están configuradas como variables de entorno del proyecto en Vercel, nunca en el repositorio. `runtimeOutputDirectory()` (`src/agent/runner.ts`) usa `/tmp` en este entorno serverless en vez de `out/`, ya que el sistema de archivos de producción es efímero por invocación.
