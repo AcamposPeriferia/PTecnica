@@ -1,5 +1,5 @@
 import { FileSessionStore } from "@/agent/session-store";
-import { runtimeOutputDirectory } from "@/agent/runner";
+import { runtimeOutputDirectory } from "@/lib/output-dir";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ChatMessage, ToolCallView } from "@/tools/types";
 
 interface ChatResponse {
@@ -25,6 +25,11 @@ function newSessionId() {
     : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function suggestedCaso() {
+  const fecha = new Date().toISOString().slice(0, 10);
+  return `caso-${fecha}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
 function ToolCall({ call, index }: { call: ToolCallView; index: number }) {
   return (
     <details className={call.ok ? "tool-call tool-call--ok" : "tool-call tool-call--error"}>
@@ -46,6 +51,9 @@ export function AgentChat() {
   const [error, setError] = useState("");
   const [model, setModel] = useState("gpt-5.5");
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadError, setUploadError] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -122,6 +130,35 @@ export function AgentChat() {
     }
   }
 
+  async function submitUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (uploadBusy || thinking) return;
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const caso = String(data.get("caso") ?? "").trim();
+    const remitente = String(data.get("remitente") ?? "").trim();
+    const asunto = String(data.get("asunto") ?? "").trim();
+    setUploadBusy(true);
+    setUploadError("");
+    try {
+      const response = await fetch("/api/uploads", { method: "POST", body: data });
+      const payload = (await response.json()) as { uploadId?: string; error?: string };
+      if (!response.ok || !payload.uploadId) throw new Error(payload.error ?? "No fue posible subir los documentos.");
+      form.reset();
+      setShowUpload(false);
+      const asuntoText = asunto ? ` El asunto de la solicitud es "${asunto}".` : "";
+      await send(
+        `Acabo de subir los documentos de un caso nuevo (uploadId: "${payload.uploadId}"). ` +
+          `Identifícalo como caso "${caso}". El correo de quien solicitó la compra es ${remitente}.${asuntoText} ` +
+          `Ingiérelo con oc_ingerir_paquete, valida y muéstrame la OC antes de crearla.`,
+      );
+    } catch (cause) {
+      setUploadError(cause instanceof Error ? cause.message : "No fue posible subir los documentos.");
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
   const empty = messages.length === 0;
 
   return (
@@ -142,6 +179,51 @@ export function AgentChat() {
               </button>
             ))}
           </section>
+
+          <button type="button" className="upload-toggle" onClick={() => setShowUpload((current) => !current)} disabled={thinking || !sessionId}>
+            {showUpload ? "Cancelar carga de caso nuevo" : "+ Subir caso nuevo (Excel, PDF, correo)"}
+          </button>
+
+          {showUpload && (
+            <form className="upload-panel" onSubmit={submitUpload}>
+              <h3>Documentos del caso nuevo</h3>
+              <label>
+                Identificador del caso
+                <input type="text" name="caso" defaultValue={suggestedCaso()} pattern="[a-z][a-z0-9-]{2,39}" required />
+              </label>
+              <label>
+                Correo del solicitante
+                <input type="email" name="remitente" placeholder="nombre@empresa.com" required />
+              </label>
+              <label>
+                Asunto de la solicitud (opcional)
+                <input type="text" name="asunto" placeholder="Compra de..." />
+              </label>
+              <label>
+                Solicitud (Excel .xlsx)
+                <input type="file" name="solicitud" accept=".xlsx" required />
+              </label>
+              <label>
+                Cotización (PDF o .txt)
+                <input type="file" name="cotizacion" accept=".pdf,.txt" required />
+              </label>
+              <label>
+                Aprobación del líder (correo .eml)
+                <input type="file" name="aprobacion" accept=".eml" required />
+                <small className="hint">Exporta el correo de aprobación como .eml desde tu cliente de correo.</small>
+              </label>
+              <label>
+                Factura (opcional, si ya llegó)
+                <input type="file" name="factura" accept=".pdf,.txt" />
+              </label>
+              {uploadError && <div className="upload-error" role="alert">{uploadError}</div>}
+              <div className="upload-panel__actions">
+                <button type="submit" disabled={uploadBusy}>{uploadBusy ? "Subiendo…" : "Subir e ingerir"}</button>
+                <button type="button" onClick={() => setShowUpload(false)} disabled={uploadBusy}>Cancelar</button>
+              </div>
+            </form>
+          )}
+
           <div className="agent-assurance"><strong>Controles del agente</strong><p>Valores solo desde herramientas · Confirmación humana · SAP idempotente · Evidencia SHA-256</p></div>
           <small className="agent-session">Sesión<br /><code>{sessionId ? sessionId.slice(0, 18) : "iniciando…"}</code></small>
         </aside>

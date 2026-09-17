@@ -2,6 +2,8 @@
 
 Agente de chat que lee el paquete de una solicitud de compra (correo, solicitud, cotización, aprobación y, si aplica, factura), lo valida contra los maestros de Periferia (RC1–RC10), construye el payload de la OC, genera la evidencia de aprobación y crea la orden en un SAP simulado. Las excepciones no se resuelven solas: se le devuelven a la analista con una recomendación y esperan su confirmación explícita.
 
+Además de los 6 casos precargados, la analista puede subir por el chat los documentos reales de un caso nuevo (Excel de solicitud, PDF de cotización, correo de aprobación) — ver [Casos nuevos por carga de documentos](#casos-nuevos-por-carga-de-documentos).
+
 Construido para el reto técnico [`PRD-03-agente-ordenes-compra-sap`](../PRD-03-agente-ordenes-compra-sap%203.md). El planteamiento completo de la solución está en [`SOLUCION.md`](./SOLUCION.md).
 
 ## Arranque en local (un comando)
@@ -61,23 +63,39 @@ Imprime por caso si es apta, sus bloqueos, sus confirmaciones y si es retroactiv
 | `POST` | `/api/chat` | `{ sessionId, message }` → `{ reply, toolCalls[], needsConfirmation, sessionId, model }`. Ejecuta un turno completo del agente (loop modelo↔herramientas). |
 | `GET` | `/api/sessions/:id` | Historial completo de la sesión (para recargar el chat). |
 | `GET` | `/api/health` | `{ ok, provider, model, configured }`, sin exponer la clave. |
+| `POST` | `/api/uploads` | `multipart/form-data` con campos `solicitud` (.xlsx), `cotizacion` (.pdf/.txt), `aprobacion` (.eml) y `factura` (opcional, .pdf/.txt) → `{ uploadId, files[] }`. Solo guarda los archivos; la extracción ocurre en `oc_ingerir_paquete`. |
 
 ## Estructura
 
 ```
 agent/prompt.md              # system prompt (comportamiento)
 src/knowledge/                # conocimiento del proceso de negocio
-src/tools/oc.ts               # las 5 herramientas del contrato (oc_*)
+src/tools/oc.ts               # las 6 herramientas del contrato (oc_*)
+src/tools/ingest.ts            # extracción determinística de Excel/PDF/correo reales
+src/tools/ingest-llm.ts        # respaldo de extracción vía LLM (solo si la determinística falla)
 src/sap/                      # interfaz SapAdapter + mock sobre out/sap/
 src/llm/                      # adaptador LLM propio (adapter.ts) + implementación OpenAI
 src/agent/                    # ciclo del agente (runner.ts) y sesiones en archivo
 src/domain/                   # esquemas zod y normalización de los fixtures
 src/components/agent-chat.tsx # front de chat (Next.js/React)
 fixtures/                     # entregado por Periferia, no se modifica
-out/                          # generado en ejecución (control.csv, log.jsonl, sap/, evidencia)
+out/                          # generado en ejecución (control.csv, log.jsonl, sap/, evidencia, casos/, uploads/)
 modulo/                       # bonus: agente empaquetado, reutilizable sin el servidor
 demo.ts                       # ver arriba
 ```
+
+## Casos nuevos por carga de documentos
+
+Además de `sol-001`…`sol-006`, el botón **"+ Subir caso nuevo"** del chat deja adjuntar los documentos reales de un caso que no está en `fixtures/`:
+
+| Documento | Formato aceptado | Extracción |
+|---|---|---|
+| Solicitud | `.xlsx` | Determinística (columnas por alias); LLM solo si la hoja no calza. |
+| Cotización | `.pdf` o `.txt` | Determinística si el texto sigue el formato de los fixtures; si no, LLM. |
+| Aprobación | `.eml` (exportar el correo desde el cliente de correo) | Determinística (cabeceras + cuerpo). |
+| Factura (opcional) | `.pdf` o `.txt` | Igual que cotización. |
+
+Cada archivo tiene un límite de 4 MB. El front sube los archivos a `POST /api/uploads` (que solo los guarda en `out/uploads/<uploadId>/raw/`) y luego le pide al agente `oc_ingerir_paquete`, que hace la extracción, valida cada documento con los mismos esquemas `zod` de los fixtures y —si algo no se pudo leer— lo dice explícitamente en vez de adivinar. Si tiene éxito, escribe el caso en `out/casos/<caso>/` con el mismo formato que un caso de fixtures y sigue el flujo normal (`oc_validar`, confirmación humana, `oc_crear`). El identificador del caso no puede seguir el patrón `sol-NNN` (reservado a los fixtures).
 
 ## `modulo/` — agente reutilizable (bonus)
 

@@ -1,11 +1,11 @@
 import "server-only";
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { LlmAdapter, LlmToolCall, LlmToolDefinition } from "@/llm/adapter";
 import { OpenAiLlmAdapter } from "@/llm/openai";
+import { runtimeOutputDirectory } from "@/lib/output-dir";
 import { ocTools, type OcToolName } from "@/tools/oc";
 import type { ChatMessage, ToolCallView, ToolContext } from "@/tools/types";
 import { FileSessionStore } from "./session-store";
@@ -22,10 +22,6 @@ export interface AgentTurnResult {
   needsConfirmation: boolean;
   sessionId: string;
   model: string;
-}
-
-export function runtimeOutputDirectory(): string {
-  return process.env.VERCEL ? path.join(tmpdir(), "ordenes-compra") : path.join(process.cwd(), "out");
 }
 
 function record(value: unknown): Record<string, unknown> {

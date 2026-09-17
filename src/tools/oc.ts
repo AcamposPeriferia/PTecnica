@@ -5,7 +5,8 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { z } from "zod";
 import { aprobacionSchema, centroCostoSchema, condicionPagoSchema, correoSchema, indicadorIvaSchema, proveedorSchema, solicitudSchema } from "@/domain/schemas";
 import { normalizeNit, normalizeText } from "@/domain/normalization";
-import { parseCotizacion, parseFactura } from "@/domain/parsers";
+import { parseCotizacion, parseFactura, type Cotizacion, type Factura } from "@/domain/parsers";
+import { extractApproval, extractInvoice, extractQuote, extractSolicitud, validateSignature } from "@/tools/ingest";
 import { FileSapAdapter } from "@/sap/mock";
 import {
   derivedSchema,
@@ -19,8 +20,11 @@ import {
   type ValidationResult,
 } from "./types";
 
+const CASO_PATTERN = /^[a-z][a-z0-9-]{2,39}$/;
+const FIXTURE_CASO_PATTERN = /^sol-\d{3}$/;
+
 const caseShape = {
-  caso: z.string().regex(/^sol-\d{3}$/).describe("Nombre de la carpeta del caso, por ejemplo sol-001"),
+  caso: z.string().regex(CASO_PATTERN).describe("Nombre del caso: sol-001..sol-006 (fixtures) o el identificador devuelto por oc_ingerir_paquete"),
 };
 
 function result(data: unknown): string {
@@ -38,9 +42,10 @@ function outputRoot(ctx: ToolContext): string {
   return ctx.outputDirectory ?? path.join(ctx.directory, "out");
 }
 
-function caseDirectory(directory: string, caso: string): string {
-  if (!/^sol-\d{3}$/.test(caso)) throw new Error("El nombre del caso no es válido");
-  return path.join(directory, "fixtures", "solicitudes", caso);
+function caseDirectory(directory: string, outputDirectory: string, caso: string): string {
+  if (!CASO_PATTERN.test(caso)) throw new Error("El nombre del caso no es válido");
+  if (FIXTURE_CASO_PATTERN.test(caso)) return path.join(directory, "fixtures", "solicitudes", caso);
+  return path.join(outputDirectory, "casos", caso);
 }
 
 async function readOptional(file: string): Promise<string | null> {
@@ -58,14 +63,16 @@ function addDays(isoDate: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function readPackage(directory: string, caso: string): Promise<NormalizedPackage> {
-  const folder = caseDirectory(directory, caso);
-  const [mailText, requestText, quoteText, approvalText, invoiceText] = await Promise.all([
+async function readPackage(directory: string, outputDirectory: string, caso: string): Promise<NormalizedPackage> {
+  const folder = caseDirectory(directory, outputDirectory, caso);
+  const [mailText, requestText, quoteText, quoteJson, approvalText, invoiceText, invoiceJson] = await Promise.all([
     readOptional(path.join(folder, "correo.json")),
     readOptional(path.join(folder, "solicitud.json")),
     readOptional(path.join(folder, "cotizacion.txt")),
+    readOptional(path.join(folder, "cotizacion.json")),
     readOptional(path.join(folder, "aprobacion.json")),
     readOptional(path.join(folder, "factura.txt")),
+    readOptional(path.join(folder, "factura.json")),
   ]);
 
   if (!mailText) throw new Error("Falta correo.json; no es posible identificar el paquete");
@@ -75,8 +82,22 @@ async function readPackage(directory: string, caso: string): Promise<NormalizedP
   const solicitud = solicitudSchema.parse(JSON.parse(requestText));
   const faltantes: string[] = [];
 
+  // cotizacion.json / factura.json existen solo para casos ingeridos desde documentos reales
+  // (oc_ingerir_paquete): ya vienen estructurados, así que se usan directo en vez de
+  // re-parsear con la expresión regular pensada para el formato de texto de los fixtures.
   let cotizacion: NormalizedPackage["cotizacion"] = null;
-  if (quoteText) {
+  if (quoteJson) {
+    const parsed = JSON.parse(quoteJson) as Cotizacion;
+    cotizacion = {
+      referencia: parsed.numero,
+      proveedor: parsed.proveedorNombre,
+      nit: parsed.proveedorNit || null,
+      total: parsed.total,
+      moneda: parsed.moneda,
+      validez_hasta: addDays(parsed.fecha, parsed.validezDias),
+      texto: quoteText ?? JSON.stringify(parsed),
+    };
+  } else if (quoteText) {
     const parsed = parseCotizacion(quoteText);
     cotizacion = {
       referencia: parsed.numero,
@@ -105,7 +126,10 @@ async function readPackage(directory: string, caso: string): Promise<NormalizedP
   }
 
   let factura: NormalizedPackage["factura"] = null;
-  if (invoiceText) {
+  if (invoiceJson) {
+    const parsed = JSON.parse(invoiceJson) as Factura;
+    factura = { numero: parsed.numero, fecha: parsed.fecha, total: parsed.total };
+  } else if (invoiceText) {
     const parsed = parseFactura(invoiceText);
     factura = { numero: parsed.numero, fecha: parsed.fecha, total: parsed.total };
   }
@@ -248,8 +272,8 @@ async function appendControl(
   await appendFile(file, `${row}\n`, "utf8");
 }
 
-async function evidenceContent(directory: string, caso: string) {
-  const raw = await readFile(path.join(caseDirectory(directory, caso), "aprobacion.json"), "utf8");
+async function evidenceContent(directory: string, outputDirectory: string, caso: string) {
+  const raw = await readFile(path.join(caseDirectory(directory, outputDirectory, caso), "aprobacion.json"), "utf8");
   const approval = aprobacionSchema.parse(JSON.parse(raw));
   const content = [
     `De: ${approval.de}`,
@@ -311,12 +335,17 @@ function inferUnit(description: string): "UN" | "H" | "MES" {
   return "UN";
 }
 
-async function buildOrder(caso: string, paquete: NormalizedPackage, directory: string): Promise<{ orden: OrdenCompra; trazabilidad: Record<string, string> }> {
+async function buildOrder(
+  caso: string,
+  paquete: NormalizedPackage,
+  directory: string,
+  outputDirectory: string,
+): Promise<{ orden: OrdenCompra; trazabilidad: Record<string, string> }> {
   const validation = await validatePackage(paquete, directory);
   if (!validation.apta) throw new Error(`No se puede construir la OC: ${validation.bloqueos.map((item) => item.detalle).join(" ")}`);
   if (!paquete.aprobacion) throw new Error("No existe evidencia de aprobación");
   const providerName = paquete.solicitud.proveedor_nombre;
-  const { sha256 } = await evidenceContent(directory, caso);
+  const { sha256 } = await evidenceContent(directory, outputDirectory, caso);
   const order = orderSchema.parse({
     referencia: {
       solicitud_id: paquete.solicitud.solicitud_id,
@@ -371,7 +400,7 @@ export const leer_paquete: ToolDefinition<typeof caseShape> = {
   args: caseShape,
   async execute({ caso }, ctx) {
     try {
-      return result(await readPackage(ctx.directory, caso));
+      return result(await readPackage(ctx.directory, outputRoot(ctx), caso));
     } catch (error) {
       return failure(error);
     }
@@ -412,7 +441,7 @@ export const construir_payload: ToolDefinition<typeof payloadShape> = {
     try {
       normalizedPackageSchema.parse(paquete);
       derivedSchema.parse(derivados);
-      const built = await buildOrder(caso, paquete, ctx.directory);
+      const built = await buildOrder(caso, paquete, ctx.directory, outputRoot(ctx));
       const directory = path.join(outputRoot(ctx), caso);
       await mkdir(directory, { recursive: true });
       const tracePath = path.join(directory, "trazabilidad.json");
@@ -429,7 +458,7 @@ export const generar_evidencia: ToolDefinition<typeof caseShape> = {
   args: caseShape,
   async execute({ caso }, ctx) {
     try {
-      const evidence = await evidenceContent(ctx.directory, caso);
+      const evidence = await evidenceContent(ctx.directory, outputRoot(ctx), caso);
       const directory = path.join(outputRoot(ctx), caso);
       await mkdir(directory, { recursive: true });
       const file = path.join(directory, "aprobacion.txt");
@@ -454,7 +483,7 @@ export const crear: ToolDefinition<typeof createShape> = {
   args: createShape,
   async execute({ caso, payload, confirmado }, ctx) {
     try {
-      const paquete = await readPackage(ctx.directory, caso);
+      const paquete = await readPackage(ctx.directory, outputRoot(ctx), caso);
       const validation = await validatePackage(paquete, ctx.directory);
       if (!validation.apta) {
         await appendControl(ctx, paquete, validation, "BLOQUEADO");
@@ -486,12 +515,122 @@ export const crear: ToolDefinition<typeof createShape> = {
   },
 };
 
+async function findUploaded(dir: string, base: string, exts: string[]): Promise<{ buffer: Buffer; ext: string } | null> {
+  for (const ext of exts) {
+    try {
+      // Ruta bajo out/uploads/ (out/tmp en runtime), nunca parte del árbol de código fuente;
+      // se excluye del rastreo de archivos de Next para no incluir todo el proyecto.
+      const buffer = await readFile(path.join(/* turbopackIgnore: true */ dir, `${base}.${ext}`));
+      return { buffer, ext };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return null;
+}
+
+const ingestShape = {
+  caso: z
+    .string()
+    .regex(CASO_PATTERN)
+    .refine((value) => !FIXTURE_CASO_PATTERN.test(value), "sol-NNN está reservado a los casos de fixtures; use otro identificador")
+    .describe("Identificador nuevo para este caso, por ejemplo compra-acme-2026-09"),
+  uploadId: z.string().regex(/^[a-f0-9-]{8,64}$/).describe("Identificador devuelto por /api/uploads al subir los documentos del caso"),
+  remitente: z.string().email().describe("Correo de quien solicitó la compra, para registrar el correo original"),
+  asunto: z.string().min(1).max(200).optional().describe("Asunto de la solicitud original, si se conoce"),
+};
+
+export const ingerir_paquete: ToolDefinition<typeof ingestShape> = {
+  description:
+    "Extrae un caso nuevo (Excel de solicitud, PDF/txt de cotización, correo .eml de aprobación, factura opcional) desde archivos ya subidos con /api/uploads y lo deja listo para oc_leer_paquete.",
+  args: ingestShape,
+  async execute({ caso, uploadId, remitente, asunto }, ctx) {
+    try {
+      const rawDir = path.join(outputRoot(ctx), "uploads", uploadId, "raw");
+
+      const solicitudFile = await findUploaded(rawDir, "solicitud", ["xlsx"]);
+      if (!solicitudFile) throw new Error("No se encontró solicitud.xlsx en los archivos subidos");
+      const cotizacionFile = await findUploaded(rawDir, "cotizacion", ["pdf", "txt"]);
+      if (!cotizacionFile) throw new Error("No se encontró cotizacion.pdf ni cotizacion.txt en los archivos subidos");
+      const aprobacionFile = await findUploaded(rawDir, "aprobacion", ["eml"]);
+      if (!aprobacionFile) throw new Error("No se encontró aprobacion.eml en los archivos subidos");
+      const facturaFile = await findUploaded(rawDir, "factura", ["pdf", "txt"]);
+
+      if (!validateSignature("solicitud", false, solicitudFile.buffer)) throw new Error("solicitud.xlsx no tiene una firma de archivo Excel válida");
+      if (!validateSignature("cotizacion", cotizacionFile.ext === "pdf", cotizacionFile.buffer)) {
+        throw new Error("cotizacion no tiene una firma de archivo válida para su extensión");
+      }
+      if (!validateSignature("aprobacion", false, aprobacionFile.buffer)) {
+        throw new Error("aprobacion.eml no parece un correo (faltan cabeceras De/Fecha/Asunto)");
+      }
+      if (facturaFile && !validateSignature("factura", facturaFile.ext === "pdf", facturaFile.buffer)) {
+        throw new Error("factura no tiene una firma de archivo válida para su extensión");
+      }
+
+      const solicitudResult = await extractSolicitud(solicitudFile.buffer);
+      const cotizacionResult = await extractQuote(cotizacionFile.buffer, cotizacionFile.ext === "pdf");
+      const aprobacionResult = await extractApproval(aprobacionFile.buffer);
+      const facturaResult = facturaFile ? await extractInvoice(facturaFile.buffer, facturaFile.ext === "pdf") : null;
+
+      const missing: string[] = [];
+      if (!solicitudResult.value) missing.push(`solicitud: ${solicitudResult.detail}`);
+      if (!cotizacionResult.value) missing.push(`cotización: ${cotizacionResult.detail}`);
+      if (!aprobacionResult.value) missing.push(`aprobación: ${aprobacionResult.detail}`);
+      if (facturaFile && facturaResult && !facturaResult.value) missing.push(`factura: ${facturaResult.detail}`);
+      if (missing.length) throw new Error(`No fue posible extraer todos los documentos: ${missing.join(" | ")}`);
+
+      const solicitudValue = solicitudResult.value as NonNullable<typeof solicitudResult.value>;
+      const cotizacionValue = cotizacionResult.value as NonNullable<typeof cotizacionResult.value>;
+      const aprobacionValue = aprobacionResult.value as NonNullable<typeof aprobacionResult.value>;
+
+      const documentos = [
+        { archivo: "solicitud.xlsx", metodo: solicitudResult.method, detalle: solicitudResult.detail },
+        { archivo: `cotizacion.${cotizacionFile.ext}`, metodo: cotizacionResult.method, detalle: cotizacionResult.detail, paginas: cotizacionResult.pages },
+        { archivo: "aprobacion.eml", metodo: aprobacionResult.method, detalle: aprobacionResult.detail },
+        ...(facturaFile && facturaResult
+          ? [{ archivo: `factura.${facturaFile.ext}`, metodo: facturaResult.method, detalle: facturaResult.detail, paginas: facturaResult.pages }]
+          : []),
+      ];
+
+      const folder = caseDirectory(ctx.directory, outputRoot(ctx), caso);
+      await mkdir(folder, { recursive: true });
+
+      const correo = {
+        id: `${caso}-correo`,
+        de: remitente,
+        para: "compras@periferia-it.com",
+        asunto: asunto ?? `Solicitud de compra ${caso}`,
+        fecha: `${solicitudValue.fecha_solicitud}T09:00:00-05:00`,
+        cuerpo: "Solicitud registrada a partir de documentos cargados por la analista (sin correo original de la solicitud).",
+        adjuntos: ["solicitud.xlsx", `cotizacion.${cotizacionFile.ext}`, "aprobacion.eml", ...(facturaFile ? [`factura.${facturaFile.ext}`] : [])],
+      };
+      correoSchema.parse(correo);
+
+      await writeFile(path.join(folder, "correo.json"), JSON.stringify(correo, null, 2), "utf8");
+      await writeFile(path.join(folder, "solicitud.json"), JSON.stringify(solicitudValue, null, 2), "utf8");
+      await writeFile(path.join(folder, "cotizacion.txt"), cotizacionResult.text, "utf8");
+      await writeFile(path.join(folder, "cotizacion.json"), JSON.stringify(cotizacionValue, null, 2), "utf8");
+      await writeFile(path.join(folder, "aprobacion.json"), JSON.stringify(aprobacionValue, null, 2), "utf8");
+      if (facturaFile && facturaResult?.value) {
+        await writeFile(path.join(folder, "factura.txt"), facturaResult.text, "utf8");
+        await writeFile(path.join(folder, "factura.json"), JSON.stringify(facturaResult.value, null, 2), "utf8");
+      }
+
+      const paquete = await readPackage(ctx.directory, outputRoot(ctx), caso);
+      return result({ caso, paquete, documentos });
+    } catch (error) {
+      return failure(error);
+    }
+  },
+};
+
 export const ocTools = {
   oc_leer_paquete: leer_paquete,
   oc_validar: validar,
   oc_construir_payload: construir_payload,
   oc_generar_evidencia: generar_evidencia,
   oc_crear: crear,
+  oc_ingerir_paquete: ingerir_paquete,
 };
 
 export type OcToolName = keyof typeof ocTools;
