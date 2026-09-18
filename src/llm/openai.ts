@@ -51,7 +51,7 @@ export class OpenAiLlmAdapter implements LlmAdapter {
 
   async enviar(request: LlmRequest): Promise<LlmResponse> {
     const response = await this.client.responses.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-5.5",
+      model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
       store: false,
       instructions: request.instructions,
       input: request.history.map(toInputItem),

@@ -5,7 +5,7 @@ export function GET() {
     {
       ok: true,
       provider: "openai",
-      model: process.env.OPENAI_MODEL ?? "gpt-5.5",
+      model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
       configured: Boolean(process.env.OPENAI_API_KEY),
     },
     { headers: { "Cache-Control": "no-store" } },

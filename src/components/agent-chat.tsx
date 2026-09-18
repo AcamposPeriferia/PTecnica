@@ -49,7 +49,7 @@ export function AgentChat() {
   const [message, setMessage] = useState("");
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState("");
-  const [model, setModel] = useState("gpt-5.5");
+  const [model, setModel] = useState("gpt-5-mini");
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);

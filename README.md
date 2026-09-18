@@ -25,7 +25,7 @@ Ver [`.env.example`](./.env.example). Solo `OPENAI_API_KEY` es obligatoria; el r
 | Variable | Obligatoria | Descripción |
 |---|---|---|
 | `OPENAI_API_KEY` | Sí | Clave del proveedor LLM. Solo se lee en el backend; nunca se expone al front, al repo ni a los logs. |
-| `OPENAI_MODEL` | No | Modelo a usar (por defecto `gpt-5.5`). |
+| `OPENAI_MODEL` | No | Modelo a usar (por defecto `gpt-5-mini`, la variante económica de la familia 5.x). |
 | `OPENAI_TIMEOUT_MS` | No | Timeout de la llamada al proveedor (por defecto 30000). |
 | `AGENT_MAX_ITERATIONS` | No | Tope de iteraciones herramienta→modelo por turno (por defecto 25, tope duro 25). |
 | `AGENT_MAX_OUTPUT_TOKENS` | No | Tokens máximos de salida por llamada al modelo (por defecto 2000). |

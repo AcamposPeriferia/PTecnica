@@ -46,7 +46,7 @@ El front (`src/components/agent-chat.tsx`) es un cliente delgado: manda `{sessio
 ## 4. Elección del modelo
 
 **Proveedor:** OpenAI, API de Responses (`src/llm/openai.ts`), por soporte nativo y maduro de *function calling* con JSON Schema y SDK oficial de TypeScript.
-**Modelo:** el configurado en `OPENAI_MODEL` (por defecto `gpt-5.5`).
+**Modelo:** el configurado en `OPENAI_MODEL` (por defecto `gpt-5-mini`); se prefirió la variante *mini* sobre `gpt-5.5` completo por costo, dado que el *tool calling* de este agente es de complejidad moderada (5–6 llamadas encadenadas por caso, esquemas ya bien definidos) y no exige el razonamiento adicional de un modelo de gama más alta.
 
 **Costo estimado por caso**: no hay telemetría de facturación instrumentada en este entorno, así que esto es una estimación por conteo, no un dato medido en producción. El diseño actual reenvía `instructions` + los 5 esquemas de herramientas + todo el historial acumulado en **cada** iteración (no se usa `previous_response_id` ni caché de prompt del lado del servidor), así que el costo real está dominado por ese *overhead* repetido, no por el tamaño del caso: un caso que termina en OC creada dispara 5–6 llamadas al modelo (una por herramienta + la respuesta final), y cada una reenvía de nuevo instructions+tools+historial completo. Orden de magnitud observado en pruebas: **10–25 mil tokens de entrada y 1–3 mil de salida por caso**. Con las tarifas vigentes del modelo configurado (verificar en el panel de precios del proveedor, cambian con frecuencia) esto se traduce típicamente en centavos de dólar por caso — bajo para este volumen, pero el patrón de "reenviar todo el historial siempre" es el primer lugar a optimizar si el volumen crece (ver §8 y §12).
 

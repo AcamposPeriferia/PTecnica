@@ -148,7 +148,7 @@ export async function runAgentTurn(sessionId: string, message: string): Promise<
   const visibleCalls: ToolCallView[] = [];
   let confirmation = false;
   let finalReply = "";
-  let model = process.env.OPENAI_MODEL ?? "gpt-5.5";
+  let model = process.env.OPENAI_MODEL ?? "gpt-5-mini";
   const maxIterations = Math.min(Number(process.env.AGENT_MAX_ITERATIONS ?? 25), 25);
   const ctx: ToolContext = { directory: process.cwd(), sessionId, outputDirectory };
 
